@@ -1,0 +1,9 @@
+[project]
+name = "netease-cookies"
+version = "0.1.0"
+description = "Capture NetEase Cloud Music cookies for yt-dlp"
+requires-python = ">=3.9"
+dependencies = ["playwright"]
+
+[tool.setuptools]
+py-modules = ["netease_cookies"]
