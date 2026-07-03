@@ -18,8 +18,10 @@ queue, key bindings, and playback state; external tools do media work.
 ## Setup
 
 ```elisp
-(add-to-list 'load-path "~/.emacs.d/netease-radio")
-(require 'netease-radio)
+(use-package netease-radio
+  :load-path "netease-radio"
+  :config
+  (setq netease-radio-yt-dlp-cookies "~/.netease-radio/cookies.txt"))
 ```
 
 ## Commands
