@@ -1,0 +1,23 @@
+# Byte-compiled Emacs Lisp
+*.elc
+
+# Emacs backup / auto-save files
+*~
+\#*\#
+.\#*
+
+# Emacs lock files
+.\#*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Python virtual environment
+.venv
+
+# flycheck / flymake
+flycheck_*.el
