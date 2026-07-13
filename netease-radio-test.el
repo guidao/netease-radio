@@ -51,6 +51,42 @@
     (should (equal (plist-get track :thumbnail-url)
                    "https://example.invalid/a.jpg"))))
 
+(ert-deftest netease-radio-test-discover-recommended-items-from-json ()
+  (let* ((json '(("result"
+                  . ((("id" . 691394551)
+                      ("name" . "Discovery A")
+                      ("trackCount" . 42)
+                      ("playCount" . 123456))
+                     (("name" . "Missing ID"))))))
+         (items (netease-radio--discover-recommended-items-from-json json))
+         (item (car items)))
+    (should (= (length items) 1))
+    (should (equal (plist-get item :id) "691394551"))
+    (should (eq (plist-get item :kind) 'playlist))
+    (should (equal (plist-get item :name) "Discovery A"))
+    (should (equal (plist-get item :url)
+                   "https://music.163.com/#/playlist?id=691394551"))
+    (should (equal (plist-get item :subtitle) "42 tracks"))
+    (should (eq (plist-get item :section) 'recommended))))
+
+(ert-deftest netease-radio-test-discover-toplist-items-from-json ()
+  (let* ((json '(("list"
+                  . ((("id" . 3779629)
+                      ("name" . "Cloud Music Top")
+                      ("updateFrequency" . "Daily")
+                      ("trackCount" . 100))
+                     (("name" . "Missing ID"))))))
+         (items (netease-radio--discover-toplist-items-from-json json))
+         (item (car items)))
+    (should (= (length items) 1))
+    (should (equal (plist-get item :id) "3779629"))
+    (should (eq (plist-get item :kind) 'playlist))
+    (should (equal (plist-get item :name) "Cloud Music Top"))
+    (should (equal (plist-get item :url)
+                   "https://music.163.com/#/playlist?id=3779629"))
+    (should (equal (plist-get item :subtitle) "Daily"))
+    (should (eq (plist-get item :section) 'toplist))))
+
 (ert-deftest netease-radio-test-search-finish-url-callback-order ()
   (let ((netease-radio--search-buffer nil)
         (netease-radio--loading-message "Searching...")
@@ -108,7 +144,7 @@
     (with-current-buffer (get-buffer-create netease-radio--buffer-name)
       (unwind-protect
           (progn
-            (netease-radio--mode)
+            (netease-radio-mode)
             (netease-radio--render-browser)
             (goto-char (point-min))
             (search-forward "Search: test")
@@ -138,7 +174,7 @@
     (with-current-buffer (get-buffer-create netease-radio--buffer-name)
       (unwind-protect
           (progn
-            (netease-radio--mode)
+            (netease-radio-mode)
             (netease-radio--render-browser)
             (goto-char (point-min))
             (search-forward "Song A")
@@ -308,6 +344,56 @@
     (should (equal (plist-get source :kind) 'playlist))
     (should (equal (plist-get source :title) "My Playlist"))
     (should (= (length (plist-get source :tracks)) 2))))
+
+(ert-deftest netease-radio-test-render-discover-item-at-point ()
+  (let ((netease-radio--discover-items
+         '(:recommended ((:id "1"
+                          :kind playlist
+                          :name "Discovery A"
+                          :url "https://music.163.com/#/playlist?id=1"
+                          :subtitle "42 tracks"
+                          :section recommended))
+           :toplists nil))
+        (netease-radio--browser-view 'discover))
+    (with-current-buffer (get-buffer-create netease-radio--buffer-name)
+      (unwind-protect
+          (progn
+            (netease-radio-mode)
+            (netease-radio--render-browser)
+            (goto-char (point-min))
+            (search-forward "Discovery A")
+            (should (equal (plist-get (netease-radio--discover-item-at-point)
+                                      :id)
+                           "1")))
+        (kill-buffer (current-buffer))))))
+
+(ert-deftest netease-radio-test-save-discover-item-to-dashboard ()
+  (let ((temp-dir (make-temp-file "netease-radio-dashboard-" t))
+        (item '(:id "1"
+                :kind playlist
+                :name "Discovery A"
+                :url "https://music.163.com/#/playlist?id=1"
+                :section recommended)))
+    (unwind-protect
+        (let ((netease-radio-data-directory temp-dir))
+          (cl-letf (((symbol-function #'netease-radio-home-view) #'ignore)
+                    ((symbol-function #'message) #'ignore))
+            (netease-radio--save-discover-item item))
+          (let ((saved (car (netease-radio--read-dashboard-playlists))))
+            (should (equal (plist-get saved :name) "Discovery A"))
+            (should (equal (plist-get saved :url)
+                           "https://music.163.com/playlist?id=1"))))
+      (delete-directory temp-dir t))))
+
+(ert-deftest netease-radio-test-refresh-discover-dispatch ()
+  (let ((netease-radio--browser-view 'discover)
+        called)
+    (cl-letf (((symbol-function #'netease-radio--refresh-discover)
+               (lambda () (setq called t)))
+              ((symbol-function #'netease-radio--render)
+               (lambda () (setq called 'rendered))))
+      (netease-radio-refresh))
+    (should (eq called t))))
 
 (provide 'netease-radio-test)
 

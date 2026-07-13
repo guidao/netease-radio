@@ -142,6 +142,23 @@ Set nil to let mpv choose its own ytdl format."
   :type 'string
   :group 'netease-radio)
 
+(defcustom netease-radio-api-discover-playlists-url
+  "https://music.163.com/api/personalized/playlist"
+  "NetEase Cloud Music recommended playlist endpoint."
+  :type 'string
+  :group 'netease-radio)
+
+(defcustom netease-radio-api-toplist-url
+  "https://music.163.com/api/toplist/detail"
+  "NetEase Cloud Music toplist endpoint."
+  :type 'string
+  :group 'netease-radio)
+
+(defcustom netease-radio-discover-recommended-limit 12
+  "Maximum number of recommended playlists shown in Discover."
+  :type 'natnum
+  :group 'netease-radio)
+
 (defcustom netease-radio-display-style 'child-frame
   "Preferred display style for the now-playing view."
   :type '(choice (const :tag "Child frame" child-frame)
@@ -192,6 +209,12 @@ Set nil to let mpv choose its own ytdl format."
 (defvar netease-radio--search-buffer nil
   "Current asynchronous search response buffer.")
 
+(defvar netease-radio--discover-recommended-buffer nil
+  "Current asynchronous Discover recommended playlists response buffer.")
+
+(defvar netease-radio--discover-toplist-buffer nil
+  "Current asynchronous Discover toplist response buffer.")
+
 (defvar netease-radio--url-import-process nil
   "Current asynchronous yt-dlp import process.")
 
@@ -200,6 +223,10 @@ Set nil to let mpv choose its own ytdl format."
 
 (defvar netease-radio--last-search-query nil
   "Last query passed to `netease-radio-search'.")
+
+(defvar netease-radio--discover-items
+  '(:recommended nil :toplists nil :recommended-error nil :toplists-error nil)
+  "Cached Discover items and per-section errors.")
 
 (defvar netease-radio--cover-downloads (make-hash-table :test #'equal)
   "Cover image URLs currently being downloaded.")
@@ -220,7 +247,7 @@ Set nil to let mpv choose its own ytdl format."
   "Cache key for `netease-radio--controls-pixel-width-cache'.")
 
 (defvar netease-radio--browser-view 'home
-  "Current browser view: home, search, or now-playing.")
+  "Current browser view: home, discover, search, or now-playing.")
 
 (defconst netease-radio--buffer-name "*netease-radio*"
   "Buffer name for the netease-radio browser.")
@@ -504,6 +531,64 @@ KEY may be a symbol; string keys are also checked for `json-parse-*' output."
              ("limit" ,(number-to-string netease-radio-search-limit))
              ("s" ,query)))))
 
+(defun netease-radio--discover-playlist-url (id)
+  "Return NetEase playlist URL for playlist ID."
+  (format "https://music.163.com/#/playlist?id=%s"
+          (url-hexify-string (format "%s" id))))
+
+(defun netease-radio--discover-recommended-url ()
+  "Return NetEase Discover recommended playlists URL."
+  (concat netease-radio-api-discover-playlists-url
+          (if (string-match-p "\\?" netease-radio-api-discover-playlists-url)
+              "&"
+            "?")
+          (url-build-query-string
+           `(("limit" ,(number-to-string netease-radio-discover-recommended-limit))))))
+
+(defun netease-radio--discover-track-count-subtitle (count)
+  "Return a subtitle for track COUNT."
+  (when (numberp count)
+    (format "%d tracks" count)))
+
+(defun netease-radio--discover-item-from-json (item section)
+  "Return a Discover item plist from JSON ITEM in SECTION."
+  (let* ((raw-id (netease-radio--json-get item 'id))
+         (name (netease-radio--json-get item 'name))
+         (id (and raw-id (format "%s" raw-id)))
+         (subtitle
+          (pcase section
+            ('toplist
+             (or (netease-radio--json-get item 'updateFrequency)
+                 (netease-radio--discover-track-count-subtitle
+                  (netease-radio--json-get item 'trackCount))))
+            (_
+             (netease-radio--discover-track-count-subtitle
+              (netease-radio--json-get item 'trackCount))))))
+    (when (and id
+               (not (string-empty-p id))
+               (stringp name)
+               (not (string-empty-p name)))
+      (list :id id
+            :kind 'playlist
+            :name name
+            :url (netease-radio--discover-playlist-url id)
+            :subtitle subtitle
+            :section section))))
+
+(defun netease-radio--discover-recommended-items-from-json (json)
+  "Return recommended Discover items from JSON."
+  (delq nil
+        (mapcar (lambda (item)
+                  (netease-radio--discover-item-from-json item 'recommended))
+                (or (netease-radio--json-get json 'result) nil))))
+
+(defun netease-radio--discover-toplist-items-from-json (json)
+  "Return toplist Discover items from JSON."
+  (delq nil
+        (mapcar (lambda (item)
+                  (netease-radio--discover-item-from-json item 'toplist))
+                (or (netease-radio--json-get json 'list) nil))))
+
 (defun netease-radio--set-loading (message)
   "Set browser loading MESSAGE and refresh the header."
   (setq netease-radio--loading-message message)
@@ -563,6 +648,119 @@ KEY may be a symbol; string keys are also checked for `json-parse-*' output."
                         (list query)
                         t
                         t))))
+
+(defun netease-radio--discover-section-keys (section)
+  "Return item and error plist keys for Discover SECTION."
+  (pcase section
+    ('recommended (cons :recommended :recommended-error))
+    ('toplist (cons :toplists :toplists-error))
+    (_ (error "Unknown Discover section %s" section))))
+
+(defun netease-radio--discover-section-title (section)
+  "Return display title for Discover SECTION."
+  (pcase section
+    ('recommended "recommended playlists")
+    ('toplist "toplists")
+    (_ "Discover")))
+
+(defun netease-radio--discover-set-section (section items error-message)
+  "Set Discover SECTION to ITEMS and ERROR-MESSAGE."
+  (let* ((keys (netease-radio--discover-section-keys section))
+         (items-key (car keys))
+         (error-key (cdr keys)))
+    (setq netease-radio--discover-items
+          (plist-put netease-radio--discover-items items-key items))
+    (setq netease-radio--discover-items
+          (plist-put netease-radio--discover-items error-key error-message))))
+
+(defun netease-radio--discover-fetching-p ()
+  "Return non-nil when any Discover request is running."
+  (or (buffer-live-p netease-radio--discover-recommended-buffer)
+      (buffer-live-p netease-radio--discover-toplist-buffer)))
+
+(defun netease-radio--discover-clear-loading-maybe ()
+  "Clear Discover loading message when no Discover request is running."
+  (unless (netease-radio--discover-fetching-p)
+    (netease-radio--clear-loading)))
+
+(defun netease-radio--discover-finish (status section)
+  "Finish asynchronous Discover request with STATUS for SECTION."
+  (unwind-protect
+      (condition-case err
+          (if-let* ((error-data (plist-get status :error)))
+              (progn
+                (netease-radio--discover-set-section
+                 section nil (format "%s" error-data))
+                (message "NetEase Discover %s failed: %s"
+                         (netease-radio--discover-section-title section)
+                         error-data))
+            (let* ((json (netease-radio--parse-url-json-buffer))
+                   (items (pcase section
+                            ('recommended
+                             (netease-radio--discover-recommended-items-from-json json))
+                            ('toplist
+                             (netease-radio--discover-toplist-items-from-json json)))))
+              (netease-radio--discover-set-section section items nil)
+              (message "NetEase Discover loaded %d %s"
+                       (length items)
+                       (netease-radio--discover-section-title section))))
+        (error
+         (netease-radio--discover-set-section
+          section nil (error-message-string err))
+         (message "NetEase Discover %s failed: %s"
+                  (netease-radio--discover-section-title section)
+                  (error-message-string err))))
+    (pcase section
+      ('recommended (setq netease-radio--discover-recommended-buffer nil))
+      ('toplist (setq netease-radio--discover-toplist-buffer nil)))
+    (netease-radio--discover-clear-loading-maybe)
+    (when (eq netease-radio--browser-view 'discover)
+      (netease-radio--render))
+    (when (buffer-live-p (current-buffer))
+      (kill-buffer (current-buffer)))))
+
+(defun netease-radio--discover-fetch ()
+  "Fetch Discover recommended playlists and toplists asynchronously."
+  (when (buffer-live-p netease-radio--discover-recommended-buffer)
+    (kill-buffer netease-radio--discover-recommended-buffer))
+  (when (buffer-live-p netease-radio--discover-toplist-buffer)
+    (kill-buffer netease-radio--discover-toplist-buffer))
+  (setq netease-radio--discover-items
+        (plist-put netease-radio--discover-items :recommended-error nil))
+  (setq netease-radio--discover-items
+        (plist-put netease-radio--discover-items :toplists-error nil))
+  (netease-radio--set-loading "Loading Discover...")
+  (let ((url-request-extra-headers
+         '(("User-Agent" . "Mozilla/5.0 netease-radio")
+           ("Referer" . "https://music.163.com/"))))
+    (setq netease-radio--discover-recommended-buffer
+          (url-retrieve (netease-radio--discover-recommended-url)
+                        #'netease-radio--discover-finish
+                        (list 'recommended)
+                        t
+                        t))
+    (setq netease-radio--discover-toplist-buffer
+          (url-retrieve netease-radio-api-toplist-url
+                        #'netease-radio--discover-finish
+                        (list 'toplist)
+                        t
+                        t))))
+
+(defun netease-radio--refresh-discover ()
+  "Refresh the Discover view."
+  (setq netease-radio--browser-view 'discover)
+  (netease-radio--render)
+  (netease-radio--discover-fetch))
+
+;;;###autoload
+(defun netease-radio-discover ()
+  "Switch to the Discover view and load recommended playlists and toplists."
+  (interactive)
+  (netease-radio--ensure-loaded)
+  (setq netease-radio--browser-view 'discover)
+  (pop-to-buffer (netease-radio--buffer))
+  (netease-radio--render)
+  (netease-radio--discover-fetch))
 
 (defun netease-radio--normalize-url (url)
   "Return URL with NetEase hash-routing stripped for yt-dlp."
@@ -711,17 +909,23 @@ Run AFTER-SUCCESS with the imported source when non-nil."
 
 ;;;###autoload
 (defun netease-radio-add-or-add-url ()
-  "Add a playlist (Home view) or import a URL (other views)."
+  "Add a playlist, save Discover item, or import a URL."
   (interactive)
   (netease-radio--ensure-loaded)
-  (if (eq netease-radio--browser-view 'home)
-      (let* ((url (read-string "Playlist URL: "))
-             (fetched-name (netease-radio--fetch-playlist-title url))
-             (default-name (or fetched-name url))
-             (name (read-string (format "Playlist name (%s): " default-name)
-                                nil nil default-name)))
-        (netease-radio-add-playlist url name))
-    (call-interactively #'netease-radio-add-url)))
+  (pcase netease-radio--browser-view
+    ('home
+     (let* ((url (read-string "Playlist URL: "))
+            (fetched-name (netease-radio--fetch-playlist-title url))
+            (default-name (or fetched-name url))
+            (name (read-string (format "Playlist name (%s): " default-name)
+                               nil nil default-name)))
+       (netease-radio-add-playlist url name)))
+    ('discover
+     (if-let* ((item (netease-radio--discover-item-at-point)))
+         (netease-radio--save-discover-item item)
+       (user-error "No Discover item at point")))
+    (_
+     (call-interactively #'netease-radio-add-url))))
 
 ;;;###autoload
 (defun netease-radio-add-url (url)
@@ -1137,6 +1341,7 @@ starting playback."
     (define-key map (kbd "q") #'netease-radio-hide-browser)
     (define-key map (kbd "Q") #'netease-radio-stop)
     (define-key map (kbd "H") #'netease-radio-home-view)
+    (define-key map (kbd "D") #'netease-radio-discover)
     (define-key map (kbd "N") #'netease-radio-now-playing-browser-view)
     map)
   "Keymap for `netease-radio-mode'.")
@@ -1224,6 +1429,8 @@ starting playback."
                 #'identity
                 (list (netease-radio--browser-header-item
                        "Home" (eq view 'home))
+                      (netease-radio--browser-header-item
+                       "Discover" (eq view 'discover))
                       (netease-radio--browser-header-item
                        "Search" (eq view 'search))
                       (netease-radio--browser-header-item
@@ -1350,6 +1557,7 @@ When OMIT-LEADING-SPACE is non-nil, do not insert the leading blank line."
         (netease-radio--insert-browser-heading-padding)
         (pcase netease-radio--browser-view
           ('home (netease-radio--render-home))
+          ('discover (netease-radio--render-discover))
           ('search (netease-radio--render-search))
           ('now-playing (netease-radio--render-now-playing-browser)))
         (goto-char (point-min))
@@ -1373,6 +1581,25 @@ When OMIT-LEADING-SPACE is non-nil, do not insert the leading blank line."
                    t)
   (with-temp-file (expand-file-name "dashboard.eld" netease-radio-data-directory)
     (prin1 playlists (current-buffer))))
+
+(defun netease-radio--save-dashboard-playlist (url name)
+  "Save playlist URL and NAME to the dashboard state file.
+Return the saved playlist entry."
+  (setq name (string-trim (or name "")))
+  (when (string-empty-p name)
+    (user-error "Playlist name cannot be empty"))
+  (when (string-empty-p (string-trim url))
+    (user-error "Playlist URL cannot be empty"))
+  (let* ((normalized (netease-radio--normalize-url url))
+         (id (secure-hash 'sha1 normalized))
+         (entry (list :id id :name name :url normalized))
+         (playlists (or (netease-radio--read-dashboard-playlists) nil))
+         (existing (seq-remove
+                    (lambda (p)
+                      (equal (plist-get p :id) id))
+                    playlists)))
+    (netease-radio--save-dashboard-playlists (cons entry existing))
+    entry))
 
 (defun netease-radio--fetch-playlist-title (url)
   "Return the playlist title for URL using yt-dlp."
@@ -1412,22 +1639,9 @@ URL is the playlist link.  NAME is fetched from NetEase automatically."
      (list url
            (read-string (format "Playlist name (%s): " default-name)
                         nil nil default-name))))
-  (setq name (string-trim (or name "")))
-  (when (string-empty-p name)
-    (user-error "Playlist name cannot be empty"))
-  (when (string-empty-p (string-trim url))
-    (user-error "Playlist URL cannot be empty"))
-  (let* ((normalized (netease-radio--normalize-url url))
-         (id (secure-hash 'sha1 normalized))
-         (entry (list :id id :name name :url normalized))
-         (playlists (or (netease-radio--read-dashboard-playlists) nil))
-         (existing (seq-remove
-                    (lambda (p)
-                      (equal (plist-get p :id) id))
-                    playlists)))
-    (netease-radio--save-dashboard-playlists (cons entry existing))
-    (netease-radio-home-view)
-    (message "Saved playlist %s" name)))
+  (netease-radio--save-dashboard-playlist url name)
+  (netease-radio-home-view)
+  (message "Saved playlist %s" name))
 
 (defun netease-radio--home-playlist-at-point ()
   "Return the dashboard playlist at point, or nil."
@@ -1491,6 +1705,79 @@ URL is the playlist link.  NAME is fetched from NetEase automatically."
                                  (list 'netease-dashboard-playlist playlist))))
       (insert "  No playlists saved yet.\n")
       (insert "  Press a to save a playlist URL.\n"))))
+
+(defun netease-radio--discover-item-at-point ()
+  "Return the Discover item at point, or nil."
+  (or (get-text-property (point) 'netease-discover-item)
+      (and (> (point) (point-min))
+           (get-text-property (1- (point)) 'netease-discover-item))))
+
+(defun netease-radio--save-discover-item (item)
+  "Save Discover ITEM as a dashboard playlist."
+  (netease-radio--save-dashboard-playlist
+   (plist-get item :url)
+   (plist-get item :name)))
+
+(defun netease-radio--render-discover-section (title items error)
+  "Render a Discover section with TITLE, list of ITEMS, and optional ERROR."
+  (insert "\n")
+  (insert-text-button title
+                      'type 'netease-radio-browser-button
+                      'face 'netease-radio-section-title
+                      'action #'ignore)
+  (insert "\n")
+  (netease-radio--insert-browser-heading-padding)
+  (cond
+   (error
+    (insert "  " (propertize (format "Error: %s" error) 'face 'shadow) "\n"))
+   ((not items)
+    (insert "  " (propertize "Loading..." 'face 'shadow) "\n"))
+   (t
+    (dolist (item items)
+      (let ((start (point))
+            (name (plist-get item :name))
+            (subtitle (plist-get item :subtitle))
+            (url (plist-get item :url)))
+        (insert "  ")
+        (insert-text-button
+         name
+         'type 'netease-radio-browser-button
+         'face 'netease-radio-home-playlist-title
+         'action (lambda (_button)
+                   (setq netease-radio--browser-view 'search)
+                   (message "Loading playlist %s..." name)
+                   (netease-radio--start-url-import
+                    url
+                    (lambda (source)
+                      (when-let* ((tracks (plist-get source :tracks)))
+                        (netease-radio--set-playback-queue
+                         tracks (car tracks))
+                        (message "Loaded %d tracks"
+                                 (length tracks)))))))
+        (when subtitle
+          (insert "  " (propertize subtitle 'face 'shadow)))
+        (insert "\n")
+        (add-text-properties start (point)
+                             (list 'netease-discover-item item)))))))
+
+(defun netease-radio--render-discover ()
+  "Render the Discover view (recommended playlists and toplists)."
+  (insert "  "
+          (propertize "Discover"
+                      'face 'netease-radio-home-header)
+          "\n")
+  (insert "  "
+          (propertize "Browse recommended playlists and charts from NetEase Cloud Music."
+                      'face 'shadow)
+          "\n")
+  (netease-radio--render-discover-section
+   "Recommended Playlists"
+   (plist-get netease-radio--discover-items :recommended)
+   (plist-get netease-radio--discover-items :recommended-error))
+  (netease-radio--render-discover-section
+   "Toplists"
+   (plist-get netease-radio--discover-items :toplists)
+   (plist-get netease-radio--discover-items :toplists-error)))
 
 (defun netease-radio--render-search ()
   "Render the Search view (search results)."
@@ -1655,10 +1942,14 @@ URL is the playlist link.  NAME is fetched from NetEase automatically."
 (defun netease-radio-refresh ()
   "Refresh the current browser view."
   (interactive)
-  (if (and (eq netease-radio--browser-view 'search)
-           netease-radio--last-search-query)
-      (netease-radio-search netease-radio--last-search-query)
-    (netease-radio--render)))
+  (cond
+   ((and (eq netease-radio--browser-view 'search)
+         netease-radio--last-search-query)
+    (netease-radio-search netease-radio--last-search-query))
+   ((eq netease-radio--browser-view 'discover)
+    (netease-radio--refresh-discover))
+   (t
+    (netease-radio--render))))
 
 (defun netease-radio--now-playing-text-width ()
   "Return now-playing text width in columns."
