@@ -1834,9 +1834,16 @@ When BUTTON is non-nil, make the text clickable."
           (let ((start (point))
                 (image (netease-radio--discover-card-image item cover-pixels)))
             (if image
-                (insert (propertize " " 'display image))
+                (insert-text-button
+                 (propertize " " 'display image)
+                 'type 'netease-radio-browser-button
+                 'face 'default
+                 'help-echo (format "Play %s" (plist-get item :name))
+                 'action (lambda (_button)
+                           (netease-radio--discover-open-item item)))
               (netease-radio--insert-discover-card-field
-               item "       ♪" content-width 'netease-radio-discover-placeholder))
+               item "       ♪" content-width
+               'netease-radio-discover-placeholder t))
             (add-text-properties start (point) (list 'netease-discover-item item))
             (insert (make-string netease-radio-discover-card-gap ?\s))))
         (insert "\n  ")
