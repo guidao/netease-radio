@@ -55,6 +55,7 @@
   (let* ((json '(("result"
                   . ((("id" . 691394551)
                       ("name" . "Discovery A")
+                      ("picUrl" . "https://img/1.jpg")
                       ("trackCount" . 42)
                       ("playCount" . 123456))
                      (("name" . "Missing ID"))))))
@@ -64,6 +65,7 @@
     (should (equal (plist-get item :id) "691394551"))
     (should (eq (plist-get item :kind) 'playlist))
     (should (equal (plist-get item :name) "Discovery A"))
+    (should (equal (plist-get item :thumbnail-url) "https://img/1.jpg"))
     (should (equal (plist-get item :url)
                    "https://music.163.com/#/playlist?id=691394551"))
     (should (equal (plist-get item :subtitle) "42 tracks"))

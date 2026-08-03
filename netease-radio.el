@@ -86,6 +86,20 @@
   "Face for Home view playlist titles."
   :group 'netease-radio)
 
+(defface netease-radio-discover-card-title
+  '((t (:inherit default :weight semi-bold)))
+  "Face for Discover card titles."
+  :group 'netease-radio)
+
+(defface netease-radio-discover-placeholder
+  '((((class color) (background light))
+     (:background "#eeeeee" :foreground "#999999"))
+    (((class color) (background dark))
+     (:background "#303030" :foreground "#aaaaaa"))
+    (t (:inherit shadow)))
+  "Face for Discover cover placeholders."
+  :group 'netease-radio)
+
 (defcustom netease-radio-mpv-program "mpv"
   "Program name or path used to run mpv."
   :type 'string
@@ -195,6 +209,19 @@ Set nil to let mpv choose its own ytdl format."
           :match-alternatives
           ((lambda (value)
              (and (integerp value) (> value 0)))))
+  :group 'netease-radio)
+
+(defcustom netease-radio-discover-cover-size 112
+  "Displayed Discover card cover size in pixels."
+  :type '(restricted-sexp
+          :match-alternatives
+          ((lambda (value)
+             (and (integerp value) (> value 0)))))
+  :group 'netease-radio)
+
+(defcustom netease-radio-discover-card-gap 3
+  "Horizontal space between Discover cards in character columns."
+  :type 'natnum
   :group 'netease-radio)
 
 (defvar netease-radio--state nil
@@ -572,6 +599,8 @@ KEY may be a symbol; string keys are also checked for `json-parse-*' output."
             :kind 'playlist
             :name name
             :url (netease-radio--discover-playlist-url id)
+            :thumbnail-url (netease-radio--json-first
+                            item 'picUrl 'coverImgUrl 'coverUrl)
             :subtitle subtitle
             :section section))))
 
@@ -1720,12 +1749,7 @@ URL is the playlist link.  NAME is fetched from NetEase automatically."
 
 (defun netease-radio--render-discover-section (title items error)
   "Render a Discover section with TITLE, list of ITEMS, and optional ERROR."
-  (insert "\n")
-  (insert-text-button title
-                      'type 'netease-radio-browser-button
-                      'face 'netease-radio-section-title
-                      'action #'ignore)
-  (insert "\n")
+  (insert "\n  " (propertize title 'face 'netease-radio-section-title) "\n")
   (netease-radio--insert-browser-heading-padding)
   (cond
    (error
@@ -1733,32 +1757,103 @@ URL is the playlist link.  NAME is fetched from NetEase automatically."
    ((not items)
     (insert "  " (propertize "Loading..." 'face 'shadow) "\n"))
    (t
-    (dolist (item items)
-      (let ((start (point))
-            (name (plist-get item :name))
-            (subtitle (plist-get item :subtitle))
-            (url (plist-get item :url)))
+    (netease-radio--insert-discover-card-grid items))))
+
+(defun netease-radio--discover-open-item (item)
+  "Load and start playing the playlist represented by Discover ITEM."
+  (let ((name (plist-get item :name))
+        (url (plist-get item :url)))
+    (setq netease-radio--browser-view 'search)
+    (message "Loading playlist %s..." name)
+    (netease-radio--start-url-import
+     url
+     (lambda (source)
+       (when-let* ((tracks (plist-get source :tracks)))
+         (netease-radio--set-playback-queue tracks (car tracks))
+         (message "Loaded %d tracks" (length tracks)))))))
+
+(defun netease-radio--discover-card-metrics ()
+  "Return (CARD-WIDTH COLUMNS) for the current Discover window."
+  (let* ((window (get-buffer-window (current-buffer) t))
+         (char-width (max 1 (frame-char-width
+                             (if window (window-frame window) (selected-frame)))))
+         (cover-columns (max 12 (ceiling
+                                 (/ (float netease-radio-discover-cover-size)
+                                    char-width))))
+         (card-width (+ cover-columns netease-radio-discover-card-gap))
+         (available (max card-width
+                         (- (if window (window-body-width window) 80) 4))))
+    (list card-width (max 1 (/ available card-width)))))
+
+(defun netease-radio--discover-card-image (item pixel-size)
+  "Return a cached image for Discover ITEM at PIXEL-SIZE.
+Queue the image for download when necessary."
+  (when-let* ((url (plist-get item :thumbnail-url)))
+    (let ((file (netease-radio--cover-cache-file url)))
+      (if (netease-radio--cover-cache-ready-p file)
+          (when (display-images-p)
+            (condition-case nil
+                (create-image file nil nil
+                              :width pixel-size
+                              :height pixel-size
+                              :ascent 'center)
+              (error nil)))
+        (netease-radio--queue-cover-download url file)
+        nil))))
+
+(defun netease-radio--insert-discover-card-field (item text width face &optional button)
+  "Insert ITEM card TEXT padded to WIDTH using FACE.
+When BUTTON is non-nil, make the text clickable."
+  (let* ((start (point))
+         (label (truncate-string-to-width (or text "") width nil nil "…"))
+         (padded (concat label (make-string (max 0 (- width (string-width label))) ?\s))))
+    (if button
+        (insert-text-button padded
+                            'type 'netease-radio-browser-button
+                            'face face
+                            'action (lambda (_button)
+                                      (netease-radio--discover-open-item item)))
+      (insert (propertize padded 'face face)))
+    (add-text-properties start (point) (list 'netease-discover-item item))))
+
+(defun netease-radio--insert-discover-card-grid (items)
+  "Insert Discover ITEMS as a responsive cover-card grid."
+  (pcase-let* ((`(,card-width ,columns) (netease-radio--discover-card-metrics))
+               (content-width (- card-width netease-radio-discover-card-gap))
+               (window (get-buffer-window (current-buffer) t))
+               (frame (if window (window-frame window) (selected-frame)))
+               ;; Image display uses pixels while card text uses columns.  Snap
+               ;; covers to a whole number of columns so later cards cannot
+               ;; accumulate horizontal drift.
+               (cover-pixels (* content-width (max 1 (frame-char-width frame)))))
+    (while items
+      (let ((row (seq-take items columns)))
+        ;; Cover row.
         (insert "  ")
-        (insert-text-button
-         name
-         'type 'netease-radio-browser-button
-         'face 'netease-radio-home-playlist-title
-         'action (lambda (_button)
-                   (setq netease-radio--browser-view 'search)
-                   (message "Loading playlist %s..." name)
-                   (netease-radio--start-url-import
-                    url
-                    (lambda (source)
-                      (when-let* ((tracks (plist-get source :tracks)))
-                        (netease-radio--set-playback-queue
-                         tracks (car tracks))
-                        (message "Loaded %d tracks"
-                                 (length tracks)))))))
-        (when subtitle
-          (insert "  " (propertize subtitle 'face 'shadow)))
-        (insert "\n")
-        (add-text-properties start (point)
-                             (list 'netease-discover-item item)))))))
+        (dolist (item row)
+          (let ((start (point))
+                (image (netease-radio--discover-card-image item cover-pixels)))
+            (if image
+                (insert (propertize " " 'display image))
+              (netease-radio--insert-discover-card-field
+               item "       ♪" content-width 'netease-radio-discover-placeholder))
+            (add-text-properties start (point) (list 'netease-discover-item item))
+            (insert (make-string netease-radio-discover-card-gap ?\s))))
+        (insert "\n  ")
+        ;; Title and metadata rows mirror music.163.com's card hierarchy.
+        (dolist (item row)
+          (netease-radio--insert-discover-card-field
+           item (plist-get item :name) content-width
+           'netease-radio-discover-card-title t)
+          (insert (make-string netease-radio-discover-card-gap ?\s)))
+        (insert "\n  ")
+        (dolist (item row)
+          (netease-radio--insert-discover-card-field
+           item (or (plist-get item :subtitle) "Playlist")
+           content-width 'shadow)
+          (insert (make-string netease-radio-discover-card-gap ?\s)))
+        (insert "\n\n")
+        (setq items (nthcdr (length row) items))))))
 
 (defun netease-radio--render-discover ()
   "Render the Discover view (recommended playlists and toplists)."
@@ -2209,7 +2304,9 @@ STATUS is the `url-retrieve' callback status plist."
               (if (netease-radio--cover-cache-ready-p target)
                   (progn
                     (remhash url netease-radio--cover-failed-urls)
-                    (netease-radio--render-now-playing))
+                    (netease-radio--render-now-playing)
+                    (when (eq netease-radio--browser-view 'discover)
+                      (netease-radio--render-browser)))
                 (puthash url t netease-radio--cover-failed-urls)
                 (when (file-exists-p target)
                   (delete-file target)))))
