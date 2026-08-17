@@ -7,7 +7,8 @@
 An experimental Emacs audio player for NetEase Cloud Music.
 
 It follows the small-player shape of `ytm-radio`: Emacs owns the browser buffer,
-queue, key bindings, and playback state; external tools do media work.
+Home, Discover, Search, and Now Playing views, queue, key bindings, and playback
+state; external tools do media work.
 
 ## Requirements
 
@@ -83,8 +84,11 @@ readable.
 
 ## Commands
 
-- `M-x netease-radio` opens the browser with Home/Search/Now-Playing tabs.
+- `M-x netease-radio` opens the browser with Home/Discover/Search/Now-Playing
+  tabs.
 - `M-x netease-radio-now-playing` opens the child-frame mini-player.
+- `M-x netease-radio-discover` browses recommended playlists and NetEase
+  toplists.
 - `M-x netease-radio-search` searches NetEase Cloud Music.
 - `M-x netease-radio-add-playlist` saves a playlist URL to Home view.
 - `M-x netease-radio-add-url` imports and plays a NetEase URL via `yt-dlp`.
@@ -103,11 +107,12 @@ Inside the browser buffer:
 | Key | Action |
 | --- | --- |
 | `H` | Home (saved playlists) |
+| `D` | Discover recommended playlists and toplists |
 | `/` | Search NetEase Cloud Music |
 | `N` | Now Playing queue |
-| `a` | Add playlist (Home) / import URL |
+| `a` | Add playlist (Home) / save card (Discover) / import URL |
 | `c` | Open now-playing |
-| `RET` | Play track at point |
+| `RET` | Play track or Discover card at point |
 | `s` | Play the current source |
 | `TAB`, `S-TAB` | Move between sections |
 | `j`, `k`, `Down`, `Up` | Move between rows |
@@ -116,9 +121,28 @@ Inside the browser buffer:
 | `r`, `x` | Repeat / shuffle |
 | `f`, `B` | Seek forward / backward |
 | `S` | Copy current track URL |
-| `g` | Refresh last search |
+| `g` | Refresh the current view or repeat the last search |
 | `q` | Quit window |
 | `Q` | Stop playback |
+
+## Discover playlists
+
+Open Discover with `M-x netease-radio-discover` or press `D` in the browser
+buffer. Recommended playlists and toplists are fetched asynchronously and shown
+as a responsive card grid. Covers are downloaded into the existing local cover
+cache; a placeholder is shown while a cover is unavailable.
+
+Move point onto a card and press `RET`, or click its cover or title, to import
+the playlist and start playing its first track. Press `a` on a card to save the
+playlist to Home, and `g` to fetch the recommendations and toplists again.
+
+The Discover view can be adjusted with:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `netease-radio-discover-recommended-limit` | `12` | Maximum number of recommended playlists |
+| `netease-radio-discover-cover-size` | `112` | Preferred cover size in pixels |
+| `netease-radio-discover-card-gap` | `3` | Space between cards in character columns |
 
 The now-playing view mirrors `ytm-radio`: by default it opens as a small child
 frame in graphical Emacs, with centered title, artist, progress text, and
